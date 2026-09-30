@@ -8,29 +8,87 @@
         name: clickhouse-server
         state: restarted
   tasks:
-    - block:
-        - name: Get clickhouse distrib
+    - name: Clickhouse installation block
+      block:
+        - name: Get Clickhouse distrib static
           ansible.builtin.get_url:
-            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            url: "https://clickhouse.com{{ item }}-{{ clickhouse_version }}.noarch.rpm"
             dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+            mode: "0644"
           with_items: "{{ clickhouse_packages }}"
       rescue:
-        - name: Get clickhouse distrib
+        - name: Get Clickhouse distrib common
           ansible.builtin.get_url:
-            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            url: "https://clickhouse.comclickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
             dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+            mode: "0644"
+
     - name: Install clickhouse packages
       become: true
-      ansible.builtin.yum:
+      ansible.builtin.dnf:
         name:
-          - clickhouse-common-static-{{ clickhouse_version }}.rpm
-          - clickhouse-client-{{ clickhouse_version }}.rpm
-          - clickhouse-server-{{ clickhouse_version }}.rpm
+          - "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+          - "./clickhouse-client-{{ clickhouse_version }}.rpm"
+          - "./clickhouse-server-{{ clickhouse_version }}.rpm"
       notify: Start clickhouse service
+
     - name: Flush handlers
-      meta: flush_handlers
+      ansible.builtin.meta: flush_handlers
+
     - name: Create database
       ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
       register: create_db
-      failed_when: create_db.rc != 0 and create_db.rc !=82
-      changed_when: create_db.rc == 0
+      failed_when: "create_db.rc != 0 and create_db.rc != 82"
+      changed_when: "create_db.rc == 0"
+
+- name: Install Vector
+  hosts: vector
+  become: true
+  become_method: sudo
+  vars:
+    vector_version: "0.34.0"
+  tasks:
+    - name: Create Vector directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "/var/lib/vector"
+        - "/etc/vector"
+
+    - name: Get Vector distrib
+      ansible.builtin.get_url:
+        url: "https://github.com/vectordotdev/vector/releases/download/v{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-musl.tar.gz"
+        dest: "/tmp/vector-{{ vector_version }}.tar.gz"
+        mode: "0644"
+        timeout: 300
+      register: download_result
+      until: download_result is success
+      retries: 3
+      delay: 10
+
+    - name: Unpack Vector distrib
+      ansible.builtin.unarchive:
+        src: "/tmp/vector-{{ vector_version }}.tar.gz"
+        dest: "/var/lib/vector"
+        extra_opts: ["--strip-components=2"]
+        remote_src: true
+
+    - name: Create symlink for Vector binary
+      ansible.builtin.file:
+        src: "/var/lib/vector/bin/vector"
+        dest: "/usr/local/bin/vector"
+        state: link
+
+    - name: Configure Vector template
+      ansible.builtin.template:
+        src: "templates/vector.toml.j2"
+        dest: "/etc/vector/vector.toml"
+        mode: "0644"
+      notify: Start vector service
+
+  handlers:
+    - name: Start vector service
+      ansible.builtin.debug:
+        msg: "Vector configuration changed, service triggered!"
